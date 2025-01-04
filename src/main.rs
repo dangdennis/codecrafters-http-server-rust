@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::str::Utf8Error;
 
@@ -10,32 +10,37 @@ fn main() {
             Ok(mut tcp_stream) => {
                 println!("accepted new connection");
 
+                let mut reader = BufReader::new(&tcp_stream);
                 let mut buffer = Vec::new();
-                match tcp_stream.read_to_end(&mut buffer) {
-                    Ok(_) => match HttpServer::parse_request(&buffer) {
-                        Ok(request) => match request.path {
-                            "http://localhost:4221/abcdefg" => {
-                                tcp_stream
-                                    .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
-                                    .expect("failed to write to stream");
-                            }
-                            "http://localhost:4221" => {
-                                tcp_stream
-                                    .write(b"HTTP/1.1 200 OK\r\n\r\n")
-                                    .expect("failed to write to stream");
+
+                // Read headers
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    buffer.extend_from_slice(line.as_bytes());
+                }
+
+                match HttpServer::parse_request(&buffer) {
+                    Ok(request) => {
+                        println!("{request:?}");
+                        match request.path {
+                            "/" => {
+                                let response = "HTTP/1.1 200 OK\r\n\r\n";
+                                tcp_stream.write_all(response.as_bytes()).unwrap();
                             }
                             _ => {
-                                tcp_stream
-                                    .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
-                                    .expect("failed to write to stream");
+                                let response = "HTTP/1.1 404 Not Found\r\n\r\n";
+                                tcp_stream.write_all(response.as_bytes()).unwrap();
                             }
-                        },
-                        Err(e) => {
-                            println!("failed to parse request: {:?}", e);
                         }
-                    },
+                    }
                     Err(e) => {
-                        println!("failed to read from stream: {}", e);
+                        println!("failed to parse request: {:?}", e);
+                        let response = "HTTP/1.1 404 Not Found\r\n\r\n";
+                        tcp_stream.write_all(response.as_bytes()).unwrap();
                     }
                 }
             }
@@ -95,6 +100,7 @@ impl HttpServer {
     }
 }
 
+#[derive(Debug)]
 struct Request<'a> {
     method: Method,
     path: &'a str,
@@ -115,6 +121,7 @@ impl From<Utf8Error> for ParseError {
     }
 }
 
+#[derive(Debug)]
 enum Method {
     Get,
     Post,
@@ -123,6 +130,7 @@ enum Method {
     Patch,
 }
 
+#[derive(Debug)]
 enum Version {
     Http1_0,
     Http1_1,
