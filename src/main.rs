@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::str::Utf8Error;
 
@@ -12,10 +12,8 @@ fn main() {
 
                 let mut buffer = Vec::new();
                 match tcp_stream.read_to_end(&mut buffer) {
-                    Ok(_) => {
-                        let request = HttpServer::parse_request(&buffer).unwrap();
-
-                        match request.path {
+                    Ok(_) => match HttpServer::parse_request(&buffer) {
+                        Ok(request) => match request.path {
                             "http://localhost:4221/abcdefg" => {
                                 tcp_stream
                                     .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
@@ -26,14 +24,16 @@ fn main() {
                                     .write(b"HTTP/1.1 200 OK\r\n\r\n")
                                     .expect("failed to write to stream");
                             }
+                            _ => {
+                                tcp_stream
+                                    .write(b"HTTP/1.1 404 Not Found\r\n\r\n")
+                                    .expect("failed to write to stream");
+                            }
+                        },
+                        Err(e) => {
+                            println!("failed to parse request: {:?}", e);
                         }
-
-                        tcp_stream
-                            .write(b"HTTP/1.1 200 OK\r\n\r\n")
-                            .expect("failed to write to stream");
-
-                        ()
-                    }
+                    },
                     Err(e) => {
                         println!("failed to read from stream: {}", e);
                     }
@@ -95,9 +95,9 @@ impl HttpServer {
     }
 }
 
-struct Request {
+struct Request<'a> {
     method: Method,
-    path: &str,
+    path: &'a str,
     version: Version,
 }
 
