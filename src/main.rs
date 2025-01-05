@@ -72,6 +72,7 @@ impl HttpServer {
     fn handle_connection(&self, mut tcp_stream: std::net::TcpStream) -> Result<()> {
         let mut reader = BufReader::new(&tcp_stream);
         let mut request_lines = Vec::new();
+        let mut content_length = 0;
 
         loop {
             let mut line = String::new();
@@ -79,9 +80,22 @@ impl HttpServer {
             if line == "\r\n" {
                 break;
             }
+            if line.starts_with("Content-Length:") {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() == 2 {
+                    content_length = parts[1].trim().parse().context("Invalid Content-Length")?;
+                }
+            }
             request_lines.extend_from_slice(line.as_bytes());
         }
 
+        if content_length > 0 {
+            let mut body = vec![0; content_length];
+            reader
+                .read_exact(&mut body)
+                .context("Failed to read body")?;
+            request_lines.extend_from_slice(&body);
+        }
         let request_lines = std::str::from_utf8(&request_lines)?;
 
         let response: String = match HttpServer::parse_request(request_lines) {
@@ -156,35 +170,78 @@ impl HttpServer {
     }
 
     fn handle_file_request(&self, request: &Request, filename: &str) -> String {
+        println!("handling request {:?}", request);
         if let Some(file_dir) = &self.file_dir {
             let file_path = format!("{}/{}", file_dir, filename);
 
             let mut resp_headers = HashMap::<String, String>::new();
             resp_headers.insert("Content-Type".into(), "application/octet-stream".into());
 
-            let file_content = match File::open(&file_path) {
-                Ok(mut file) => {
-                    let mut content = String::new();
-                    file.read_to_string(&mut content)
-                        .context("Failed to read file")
-                        .ok()
-                        .map(|_| content)
+            match request.method {
+                Method::Get => {
+                    let file_content = match File::open(&file_path) {
+                        Ok(mut file) => {
+                            let mut content = String::new();
+                            file.read_to_string(&mut content)
+                                .context("Failed to read file")
+                                .ok()
+                                .map(|_| content)
+                        }
+                        Err(_) => None,
+                    };
+
+                    if let Some(body) = file_content {
+                        resp_headers.insert("Content-Length".into(), body.len().to_string());
+                        let res = Response {
+                            status_code: 200,
+                            version: request.version,
+                            headers: resp_headers,
+                            body: Some(body),
+                        };
+
+                        res.to_http_string()
+                    } else {
+                        self.handle_not_found(request)
+                    }
                 }
-                Err(_) => None,
-            };
-
-            if let Some(body) = file_content {
-                resp_headers.insert("Content-Length".into(), body.len().to_string());
-                let res = Response {
-                    status_code: 200,
-                    version: request.version,
-                    headers: resp_headers,
-                    body: Some(body),
-                };
-
-                res.to_http_string()
-            } else {
-                self.handle_not_found(request)
+                Method::Post => {
+                    if let Some(body) = &request.body {
+                        if let Ok(mut file) =
+                            File::create(file_path).context("Failed to create file")
+                        {
+                            if let Ok(_) = file
+                                .write_all(body.as_bytes())
+                                .context("Failed to write to file")
+                            {
+                                let res = Response {
+                                    status_code: 201,
+                                    version: request.version,
+                                    headers: resp_headers,
+                                    body: Some(body.clone()),
+                                };
+                                res.to_http_string()
+                            } else {
+                                eprintln!("failed to write file");
+                                self.handle_internal_server_error()
+                            }
+                        } else {
+                            eprintln!("failed to create file");
+                            self.handle_internal_server_error()
+                        }
+                    } else {
+                        self.handle_internal_server_error()
+                    }
+                }
+                _ => {
+                    eprintln!("unhandled request method");
+                    Response {
+                        body: None,
+                        status_code: 500,
+                        version: request.version,
+                        headers: HashMap::new(),
+                    }
+                    .to_http_string()
+                }
             }
         } else {
             self.handle_not_found(request)
@@ -213,6 +270,7 @@ impl HttpServer {
 
     fn parse_request(input: &str) -> Result<Request, ParseError> {
         let mut lines = input.lines().peekable();
+
         let req_line = lines.next().ok_or(ParseError::InvalidRequest)?;
         let mut parts = req_line.split_whitespace();
 
@@ -228,14 +286,11 @@ impl HttpServer {
         let mut body = None;
 
         while let Some(line) = lines.next() {
-            if line.is_empty() {
-                // Empty line indicates the end of headers and start of body
-                body = Some(lines.collect::<Vec<&str>>().join("\n"));
-                break;
-            }
-
             if let Some((key, value)) = line.split_once(": ") {
                 headers.insert(key.to_lowercase().to_string(), value.to_string());
+            } else {
+                // Lazy me assuming the last line is the body.
+                body = Some(line.to_string());
             }
         }
 
@@ -312,6 +367,7 @@ impl Response {
     fn reason_phrase(&self) -> &str {
         match self.status_code {
             200 => "OK",
+            201 => "Created",
             404 => "Not Found",
             500 => "Internal Server Error",
             _ => "Unknown Status",
