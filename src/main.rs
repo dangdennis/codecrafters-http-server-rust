@@ -77,7 +77,7 @@ impl HttpServer {
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).context("Failed to read line")?;
-            if line == "\r\n" {
+            if line.trim().is_empty() {
                 break;
             }
             if line.starts_with("Content-Length:") {
@@ -96,9 +96,8 @@ impl HttpServer {
                 .context("Failed to read body")?;
             request_lines.extend_from_slice(&body);
         }
-        let request_lines = std::str::from_utf8(&request_lines)?;
 
-        let response: String = match HttpServer::parse_request(request_lines) {
+        let response: String = match HttpServer::parse_request(std::str::from_utf8(&request_lines)?) {
             Ok(request) => {
                 let path_vec = request.path.split('/').collect::<Vec<&str>>();
                 let path_parts = path_vec.as_slice();
