@@ -115,6 +115,7 @@ impl HttpServer {
                         if supports_gzip {
                             resp.should_compress = true;
                         }
+                        // println!("resp: {:#?}", resp);
                         resp
                     },
                     ["", "files", filename] => {
@@ -133,9 +134,9 @@ impl HttpServer {
             }
         };
 
-        tcp_stream
-            .write_all(response.to_http_string().as_bytes())
-            .context("Failed to write response")?;
+        let (http_header, body) = response.to_http_string_and_body();
+        tcp_stream.write_all(http_header.as_bytes())?;
+        tcp_stream.write_all(&body)?;
 
         Ok(())
     }
@@ -185,7 +186,6 @@ impl HttpServer {
     }
 
     fn handle_file_request(&self, request: &Request, filename: &str) -> Response {
-        println!("handling request {:?}", request);
         if let Some(file_dir) = &self.file_dir {
             let file_path = format!("{}/{}", file_dir, filename);
 
@@ -387,7 +387,7 @@ struct Response {
 }
 
 impl Response {
-    fn to_http_string(&self) -> String {
+    fn to_http_string_and_body(&self) -> (String, Vec<u8>) {
         let mut headers = self.headers.clone();
         let body = if self.should_compress && self.body.is_some() {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -396,15 +396,15 @@ impl Response {
                 if let Ok(compressed) = encoder.finish() {
                     headers.insert("Content-Encoding".to_string(), "gzip".to_string());
                     headers.insert("Content-Length".to_string(), compressed.len().to_string());
-                    String::from_utf8_lossy(&compressed).to_string()
+                    compressed
                 } else {
-                    self.body.clone().unwrap_or_default()
+                    self.body.clone().unwrap_or_default().into_bytes()
                 }
             } else {
-                String::new()
+                Vec::new()
             }
         } else {
-            self.body.clone().unwrap_or_default()
+            self.body.clone().unwrap_or_default().into_bytes()
         };
 
         let status_line = format!(
@@ -419,12 +419,12 @@ impl Response {
             .collect::<Vec<String>>()
             .join("\r\n");
 
-        format!(
-            "{}\r\n{}\r\n\r\n{}",
+        let http_header = format!(
+            "{}\r\n{}\r\n\r\n",
             status_line,
             headers,
-            body
-        )
+        );
+        (http_header, body)
     }
 
     fn reason_phrase(&self) -> &str {
