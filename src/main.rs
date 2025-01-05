@@ -2,21 +2,26 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::thread::{self, Thread};
+use std::sync::Arc;
+use std::thread;
 
 fn main() -> Result<(), ()> {
-    let http_server = HttpServer::new();
+    let http_server = CodeCraftsHttpServer::new();
     http_server.listen()
 }
 
-struct HttpServer {}
+struct CodeCraftsHttpServer {
+    server: Arc<HttpServer>,
+}
 
-impl HttpServer {
+impl CodeCraftsHttpServer {
     fn new() -> Self {
-        Self {}
+        Self {
+            server: Arc::new(HttpServer {}),
+        }
     }
 
-    fn listen(&self) -> Result<(), ()> {
+    fn listen(self) -> Result<(), ()> {
         let listener = TcpListener::bind("127.0.0.1:4221")
             .context("Failed to bind to address")
             .map_err(|err| {
@@ -26,11 +31,11 @@ impl HttpServer {
 
         for stream in listener.incoming() {
             match stream {
-                Ok(mut tcp_stream) => {
+                Ok(tcp_stream) => {
+                    let server = Arc::clone(&self.server);
                     thread::spawn(move || {
-                        let server = HttpServer::new();
                         if let Err(err) = server
-                            .handle_connection(&mut tcp_stream)
+                            .handle_connection(tcp_stream)
                             .context("Failed to handle connection")
                         {
                             eprintln!("{:?}", err);
@@ -45,7 +50,11 @@ impl HttpServer {
 
         Ok(())
     }
+}
 
+struct HttpServer {}
+
+impl HttpServer {
     fn parse_request(input: &str) -> Result<Request, ParseError> {
         let mut lines = input.lines().peekable();
         let req_line = lines.next().ok_or(ParseError::InvalidRequest)?;
@@ -103,8 +112,8 @@ impl HttpServer {
         }
     }
 
-    fn handle_connection(&self, tcp_stream: &mut std::net::TcpStream) -> Result<()> {
-        let mut reader = BufReader::new(tcp_stream.by_ref());
+    fn handle_connection(&self, mut tcp_stream: std::net::TcpStream) -> Result<()> {
+        let mut reader = BufReader::new(&tcp_stream);
         let mut request_lines = Vec::new();
 
         loop {
