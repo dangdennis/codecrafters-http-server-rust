@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::thread::{self, Thread};
 
 fn main() -> Result<(), ()> {
     let http_server = HttpServer::new();
@@ -26,12 +27,15 @@ impl HttpServer {
         for stream in listener.incoming() {
             match stream {
                 Ok(mut tcp_stream) => {
-                    if let Err(err) = self
-                        .handle_connection(&mut tcp_stream)
-                        .context("Failed to handle connection")
-                    {
-                        eprintln!("{:?}", err);
-                    }
+                    thread::spawn(move || {
+                        let server = HttpServer::new(); // Create a new instance of HttpServer
+                        if let Err(err) = server
+                            .handle_connection(&mut tcp_stream)
+                            .context("Failed to handle connection")
+                        {
+                            eprintln!("{:?}", err);
+                        }
+                    });
                 }
                 Err(err) => {
                     eprintln!("Failed to accept connection: {:?}", err);
