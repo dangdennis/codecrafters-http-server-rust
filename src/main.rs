@@ -28,7 +28,7 @@ impl HttpServer {
             match stream {
                 Ok(mut tcp_stream) => {
                     thread::spawn(move || {
-                        let server = HttpServer::new(); // Create a new instance of HttpServer
+                        let server = HttpServer::new();
                         if let Err(err) = server
                             .handle_connection(&mut tcp_stream)
                             .context("Failed to handle connection")
