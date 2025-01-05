@@ -6,6 +6,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::Arc;
 use std::thread;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 
 fn main() -> Result<(), ()> {
     let args: Vec<String> = std::env::args().collect();
@@ -97,15 +99,31 @@ impl HttpServer {
             request_lines.extend_from_slice(&body);
         }
 
-        let response: String = match HttpServer::parse_request(std::str::from_utf8(&request_lines)?) {
+        let response: Response = match HttpServer::parse_request(std::str::from_utf8(&request_lines)?) {
             Ok(request) => {
+                let supports_gzip = request.headers.get("accept-encoding")
+                    .map(|encodings| encodings.to_lowercase().contains("gzip"))
+                    .unwrap_or(false);
+
                 let path_vec = request.path.split('/').collect::<Vec<&str>>();
                 let path_parts = path_vec.as_slice();
                 match path_parts {
                     ["", ""] => self.handle_root_request(&request),
                     ["", "user-agent"] => self.handle_user_agent_request(&request),
-                    ["", "echo", echo_str] => self.handle_echo_request(&request, echo_str),
-                    ["", "files", filename] => self.handle_file_request(&request, filename),
+                    ["", "echo", echo_str] => {
+                        let mut resp = self.handle_echo_request(&request, echo_str);
+                        if supports_gzip {
+                            resp.should_compress = true;
+                        }
+                        resp
+                    },
+                    ["", "files", filename] => {
+                        let mut resp = self.handle_file_request(&request, filename);
+                        if supports_gzip {
+                            resp.should_compress = true;
+                        }
+                        resp
+                    },
                     _ => self.handle_not_found(&request),
                 }
             }
@@ -116,23 +134,23 @@ impl HttpServer {
         };
 
         tcp_stream
-            .write_all(response.as_bytes())
+            .write_all(response.to_http_string().as_bytes())
             .context("Failed to write response")?;
 
         Ok(())
     }
 
-    fn handle_root_request(&self, request: &Request) -> String {
+    fn handle_root_request(&self, request: &Request) -> Response {
         Response {
             body: None,
             headers: HashMap::new(),
             status_code: 200,
             version: request.version,
+            should_compress: false,
         }
-        .to_http_string()
     }
 
-    fn handle_user_agent_request(&self, request: &Request) -> String {
+    fn handle_user_agent_request(&self, request: &Request) -> Response {
         let ua = request.headers.get("user-agent").cloned();
         let mut resp_headers = HashMap::new();
         resp_headers.insert("Content-Type".into(), "text/plain".into());
@@ -142,33 +160,31 @@ impl HttpServer {
                 .map_or("0".to_string(), |ua_str| ua_str.len().to_string()),
         );
 
-        let res = Response {
+        Response {
             status_code: 200,
             version: request.version,
             headers: resp_headers,
             body: ua,
-        };
-
-        res.to_http_string()
+            should_compress: false,
+        }
     }
 
-    fn handle_echo_request(&self, request: &Request, echo_str: &str) -> String {
+    fn handle_echo_request(&self, request: &Request, echo_str: &str) -> Response {
         let body = echo_str.to_string();
         let mut resp_headers = HashMap::new();
         resp_headers.insert("Content-Type".into(), "text/plain".into());
         resp_headers.insert("Content-Length".into(), body.len().to_string());
 
-        let res = Response {
+        Response {
             status_code: 200,
             version: request.version,
             headers: resp_headers,
             body: Some(body),
-        };
-
-        res.to_http_string()
+            should_compress: false,
+        }
     }
 
-    fn handle_file_request(&self, request: &Request, filename: &str) -> String {
+    fn handle_file_request(&self, request: &Request, filename: &str) -> Response {
         println!("handling request {:?}", request);
         if let Some(file_dir) = &self.file_dir {
             let file_path = format!("{}/{}", file_dir, filename);
@@ -191,16 +207,21 @@ impl HttpServer {
 
                     if let Some(body) = file_content {
                         resp_headers.insert("Content-Length".into(), body.len().to_string());
-                        let res = Response {
+                        Response {
                             status_code: 200,
                             version: request.version,
                             headers: resp_headers,
                             body: Some(body),
-                        };
-
-                        res.to_http_string()
+                            should_compress: false,
+                        }
                     } else {
-                        self.handle_not_found(request)
+                        Response {
+                            status_code: 404,
+                            version: request.version,
+                            headers: HashMap::new(),
+                            body: None,
+                            should_compress: false,
+                        }
                     }
                 }
                 Method::Post => {
@@ -212,23 +233,41 @@ impl HttpServer {
                                 .write_all(body.as_bytes())
                                 .context("Failed to write to file")
                             {
-                                let res = Response {
+                                Response {
                                     status_code: 201,
                                     version: request.version,
                                     headers: resp_headers,
                                     body: Some(body.clone()),
-                                };
-                                res.to_http_string()
+                                    should_compress: false,
+                                }
                             } else {
                                 eprintln!("failed to write file");
-                                self.handle_internal_server_error()
+                                Response {
+                                    status_code: 500,
+                                    version: request.version,
+                                    headers: HashMap::new(),
+                                    body: None,
+                                    should_compress: false,
+                                }
                             }
                         } else {
                             eprintln!("failed to create file");
-                            self.handle_internal_server_error()
+                            Response {
+                                status_code: 500,
+                                version: request.version,
+                                headers: HashMap::new(),
+                                body: None,
+                                should_compress: false,
+                            }
                         }
                     } else {
-                        self.handle_internal_server_error()
+                        Response {
+                            status_code: 500,
+                            version: request.version,
+                            headers: HashMap::new(),
+                            body: None,
+                            should_compress: false,
+                        }
                     }
                 }
                 _ => {
@@ -238,33 +277,39 @@ impl HttpServer {
                         status_code: 500,
                         version: request.version,
                         headers: HashMap::new(),
+                        should_compress: false,
                     }
-                    .to_http_string()
                 }
             }
         } else {
-            self.handle_not_found(request)
+            Response {
+                status_code: 404,
+                version: request.version,
+                headers: HashMap::new(),
+                body: None,
+                should_compress: false,
+            }
         }
     }
 
-    fn handle_not_found(&self, request: &Request) -> String {
+    fn handle_not_found(&self, request: &Request) -> Response {
         Response {
             status_code: 404,
             version: request.version,
             headers: HashMap::new(),
             body: None,
+            should_compress: false,
         }
-        .to_http_string()
     }
 
-    fn handle_internal_server_error(&self) -> String {
+    fn handle_internal_server_error(&self) -> Response {
         Response {
             status_code: 500,
             version: Version::Http1_1,
             headers: HashMap::new(),
             body: None,
+            should_compress: false,
         }
-        .to_http_string()
     }
 
     fn parse_request(input: &str) -> Result<Request, ParseError> {
@@ -338,18 +383,37 @@ struct Response {
     version: Version,
     headers: HashMap<String, String>,
     body: Option<String>,
+    should_compress: bool,
 }
 
 impl Response {
     fn to_http_string(&self) -> String {
+        let mut headers = self.headers.clone();
+        let body = if self.should_compress && self.body.is_some() {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            if let Some(body) = &self.body {
+                encoder.write_all(body.as_bytes()).unwrap_or_default();
+                if let Ok(compressed) = encoder.finish() {
+                    headers.insert("Content-Encoding".to_string(), "gzip".to_string());
+                    headers.insert("Content-Length".to_string(), compressed.len().to_string());
+                    String::from_utf8_lossy(&compressed).to_string()
+                } else {
+                    self.body.clone().unwrap_or_default()
+                }
+            } else {
+                String::new()
+            }
+        } else {
+            self.body.clone().unwrap_or_default()
+        };
+
         let status_line = format!(
             "{} {} {}",
             self.version.to_str(),
             self.status_code,
             self.reason_phrase()
         );
-        let headers: String = self
-            .headers
+        let headers: String = headers
             .iter()
             .map(|(key, value)| format!("{}: {}", key, value))
             .collect::<Vec<String>>()
@@ -359,7 +423,7 @@ impl Response {
             "{}\r\n{}\r\n\r\n{}",
             status_line,
             headers,
-            self.body.clone().unwrap_or_else(|| "".to_string())
+            body
         )
     }
 
