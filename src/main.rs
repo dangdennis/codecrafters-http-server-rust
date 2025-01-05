@@ -89,115 +89,16 @@ impl HttpServer {
                 let path_vec = request.path.split('/').collect::<Vec<&str>>();
                 let path_parts = path_vec.as_slice();
                 match path_parts {
-                    ["", ""] => Response {
-                        body: None,
-                        headers: HashMap::new(),
-                        status_code: 200,
-                        version: request.version,
-                    }
-                    .to_http_string(),
-                    ["", "user-agent"] => {
-                        let ua = request.headers.get("user-agent").cloned();
-                        let mut resp_headers = HashMap::new();
-                        resp_headers.insert("Content-Type".into(), "text/plain".into());
-                        resp_headers.insert(
-                            "Content-Length".into(),
-                            ua.as_ref()
-                                .map_or("0".to_string(), |ua_str| ua_str.len().to_string()),
-                        );
-
-                        let res = Response {
-                            status_code: 200,
-                            version: request.version,
-                            headers: resp_headers,
-                            body: ua,
-                        };
-
-                        res.to_http_string()
-                    }
-                    ["", "echo", echo_str] => {
-                        let body = (*echo_str).to_string();
-                        let mut resp_headers = HashMap::new();
-                        resp_headers.insert("Content-Type".into(), "text/plain".into());
-                        resp_headers.insert("Content-Length".into(), body.len().to_string());
-
-                        let res = Response {
-                            status_code: 200,
-                            version: request.version,
-                            headers: resp_headers,
-                            body: Some(body),
-                        };
-
-                        res.to_http_string()
-                    }
-                    ["", "files", filename] => {
-                        if let Some(file_dir) = &self.file_dir {
-                            let file_path = format!("{}/{}", file_dir, filename);
-
-                            let mut resp_headers = HashMap::<String, String>::new();
-                            resp_headers
-                                .insert("Content-Type".into(), "application/octet-stream".into());
-
-                            let file_content = match File::open(&file_path) {
-                                Ok(mut file) => {
-                                    let mut content = String::new();
-                                    file.read_to_string(&mut content)
-                                        .context("Failed to read file")?;
-                                    Some(content)
-                                }
-                                Err(_) => None,
-                            };
-
-                            if let Some(body) = file_content {
-                                resp_headers
-                                    .insert("Content-Length".into(), body.len().to_string());
-                                let res = Response {
-                                    status_code: 200,
-                                    version: request.version,
-                                    headers: resp_headers,
-                                    body: Some(body),
-                                };
-
-                                res.to_http_string()
-                            } else {
-                                let res = Response {
-                                    status_code: 404,
-                                    version: request.version,
-                                    headers: HashMap::new(),
-                                    body: None,
-                                };
-
-                                res.to_http_string()
-                            }
-                        } else {
-                            let res = Response {
-                                status_code: 404,
-                                version: request.version,
-                                headers: HashMap::new(),
-                                body: None,
-                            };
-
-                            res.to_http_string()
-                        }
-                    }
-                    _ => Response {
-                        body: None,
-                        headers: HashMap::new(),
-                        status_code: 404,
-                        version: request.version,
-                    }
-                    .to_http_string(),
+                    ["", ""] => self.handle_root_request(&request),
+                    ["", "user-agent"] => self.handle_user_agent_request(&request),
+                    ["", "echo", echo_str] => self.handle_echo_request(&request, echo_str),
+                    ["", "files", filename] => self.handle_file_request(&request, filename),
+                    _ => self.handle_not_found(&request),
                 }
             }
             Err(e) => {
                 println!("failed to parse request: {:?}", e);
-                Response {
-                    body: None,
-                    headers: HashMap::new(),
-                    status_code: 404,
-                    version: Version::Http1_1,
-                }
-                .to_http_string()
+                self.handle_internal_server_error()
             }
         };
 
@@ -206,6 +107,108 @@ impl HttpServer {
             .context("Failed to write response")?;
 
         Ok(())
+    }
+
+    fn handle_root_request(&self, request: &Request) -> String {
+        Response {
+            body: None,
+            headers: HashMap::new(),
+            status_code: 200,
+            version: request.version,
+        }
+        .to_http_string()
+    }
+
+    fn handle_user_agent_request(&self, request: &Request) -> String {
+        let ua = request.headers.get("user-agent").cloned();
+        let mut resp_headers = HashMap::new();
+        resp_headers.insert("Content-Type".into(), "text/plain".into());
+        resp_headers.insert(
+            "Content-Length".into(),
+            ua.as_ref()
+                .map_or("0".to_string(), |ua_str| ua_str.len().to_string()),
+        );
+
+        let res = Response {
+            status_code: 200,
+            version: request.version,
+            headers: resp_headers,
+            body: ua,
+        };
+
+        res.to_http_string()
+    }
+
+    fn handle_echo_request(&self, request: &Request, echo_str: &str) -> String {
+        let body = echo_str.to_string();
+        let mut resp_headers = HashMap::new();
+        resp_headers.insert("Content-Type".into(), "text/plain".into());
+        resp_headers.insert("Content-Length".into(), body.len().to_string());
+
+        let res = Response {
+            status_code: 200,
+            version: request.version,
+            headers: resp_headers,
+            body: Some(body),
+        };
+
+        res.to_http_string()
+    }
+
+    fn handle_file_request(&self, request: &Request, filename: &str) -> String {
+        if let Some(file_dir) = &self.file_dir {
+            let file_path = format!("{}/{}", file_dir, filename);
+
+            let mut resp_headers = HashMap::<String, String>::new();
+            resp_headers.insert("Content-Type".into(), "application/octet-stream".into());
+
+            let file_content = match File::open(&file_path) {
+                Ok(mut file) => {
+                    let mut content = String::new();
+                    file.read_to_string(&mut content)
+                        .context("Failed to read file")
+                        .ok()
+                        .map(|_| content)
+                }
+                Err(_) => None,
+            };
+
+            if let Some(body) = file_content {
+                resp_headers.insert("Content-Length".into(), body.len().to_string());
+                let res = Response {
+                    status_code: 200,
+                    version: request.version,
+                    headers: resp_headers,
+                    body: Some(body),
+                };
+
+                res.to_http_string()
+            } else {
+                self.handle_not_found(request)
+            }
+        } else {
+            self.handle_not_found(request)
+        }
+    }
+
+    fn handle_not_found(&self, request: &Request) -> String {
+        Response {
+            status_code: 404,
+            version: request.version,
+            headers: HashMap::new(),
+            body: None,
+        }
+        .to_http_string()
+    }
+
+    fn handle_internal_server_error(&self) -> String {
+        Response {
+            status_code: 500,
+            version: Version::Http1_1,
+            headers: HashMap::new(),
+            body: None,
+        }
+        .to_http_string()
     }
 
     fn parse_request(input: &str) -> Result<Request, ParseError> {
@@ -332,7 +335,7 @@ enum Method {
     Patch,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Version {
     Http1_0,
     Http1_1,
